@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import io
 import os
+import math
 from src.loader import load_swbm_csv, load_static_wbm_csv, process_dynamic_wbm_csv
 from src.calculations import run_single_reliability, fit_weibull_from_mean_std
 from src.plotting import (
@@ -57,8 +58,8 @@ if 'static_wbm_cases' not in st.session_state:
     st.session_state['static_wbm_cases'] = []
 if 'wave_cases' not in st.session_state:
     st.session_state['wave_cases'] = []
-if 'section_modulus' not in st.session_state:
-    st.session_state['section_modulus'] = 3.2292
+if 'section_moduli' not in st.session_state:
+    st.session_state['section_moduli'] = [3.2292]
 if 'swbm_ship' not in st.session_state:
     st.session_state['swbm_ship'] = 1.2e8 # 120,000 kNm in N.m
 if 'results' not in st.session_state:
@@ -71,7 +72,7 @@ EXAMPLES_DIR = os.path.join(os.path.dirname(__file__), 'data', 'examples')
 
 def load_defaults():
     """Populates session state with default data mimicking the main notebook analysis."""
-    st.session_state['section_modulus'] = 3.2292
+    st.session_state['section_moduli'] = [3.2292]
     st.session_state['swbm_ship'] = 1.2e8
     
     # Default materials
@@ -104,14 +105,6 @@ def load_defaults():
 # ----------------- SIDEBAR CONFIGURATIONS -----------------
 with st.sidebar:
     st.header("Global Parameters")
-    st.session_state['section_modulus'] = st.number_input(
-        "Section Modulus W (m³)",
-        min_value=0.01,
-        value=st.session_state['section_modulus'],
-        step=0.1,
-        help="Kapal modulus penampang melintang nominal (W)"
-    )
-    
     st.session_state['swbm_ship'] = st.number_input(
         "Ship SWBM Constant (N.m)",
         min_value=0.0,
@@ -125,9 +118,10 @@ with st.sidebar:
     if st.button("Load Default Notebook Data", use_container_width=True):
         load_defaults()
         st.success("Default configuration loaded!")
+        st.rerun()
         
     st.markdown("### Quick Examples Info")
-    st.info("Default data contains 2 materials, 1 SWBM, 1 Static WBM, and 6 wave cases, totaling 12 calculation runs.")
+    st.info("Default data contains 1 Section Modulus value, 2 materials, 1 SWBM, 1 Static WBM, and 6 wave cases, totaling 12 calculation runs.")
 
 # ----------------- MAIN INTERFACE TABS -----------------
 tab1, tab2, tab3 = st.tabs(["Setup & Configurations", "Analysis Results", "Visualizations"])
@@ -140,22 +134,125 @@ with tab1:
         st.subheader("1. Material Strengths")
         with st.container(border=True):
             mat_name = st.text_input("Material Name", "A36 Steel")
+            mat_dist = st.selectbox("Probability Distribution", ["Normal", "Lognormal", "Weibull"], key="mat_dist_select", help="Pilih jenis distribusi probabilitas untuk kekuatan material.")
             mat_input_method = st.radio("Input Method", ["Manual Parameters", "Upload CSV", "Use A36 Example Data"], key="mat_method")
             
             mean_mat, std_mat = 0.0, 0.0
             uploaded_mat_df = None
             
             if mat_input_method == "Manual Parameters":
-                col_m1, col_m2 = st.columns(2)
-                with col_m1:
-                    mean_mat = st.number_input("Mean Strength (MPa)", min_value=1.0, value=250.0)
-                with col_m2:
-                    param_type = st.selectbox("Dispersion parameter", ["Standard Deviation", "COV (Coeff of Var)"])
-                    if param_type == "Standard Deviation":
-                        std_mat = st.number_input("Std Dev (MPa)", min_value=0.1, value=25.0)
+                if mat_dist == "Normal":
+                    col_m1, col_m2 = st.columns(2)
+                    with col_m1:
+                        mean_mat = st.number_input(
+                            "Mean Strength (μ) (MPa)", 
+                            min_value=1.0, 
+                            value=250.0,
+                            help="Nilai rata-rata aritmatika kekuatan material."
+                        )
+                    with col_m2:
+                        param_type = st.selectbox("Dispersion parameter", ["Standard Deviation", "COV (Coeff of Var)"])
+                        if param_type == "Standard Deviation":
+                            std_mat = st.number_input(
+                                "Std Dev (σ) (MPa)", 
+                                min_value=0.1, 
+                                value=25.0,
+                                help="Standar deviasi aritmatika kekuatan material."
+                            )
+                        else:
+                            cov_val = st.number_input("COV (0 to 1)", min_value=0.01, max_value=1.0, value=0.1)
+                            std_mat = mean_mat * cov_val
+                            
+                elif mat_dist == "Lognormal":
+                    log_input_mode = st.radio(
+                        "Lognormal Parameters Input Mode",
+                        ["Arithmetic (Mean & Std Dev)", "Log-scale (μ_ln & σ_ln)"],
+                        help="Pilih metode input untuk distribusi Lognormal. Baik parameter aritmatika maupun log-skala secara otomatis dikonversi secara presisi."
+                    )
+                    if log_input_mode == "Arithmetic (Mean & Std Dev)":
+                        col_m1, col_m2 = st.columns(2)
+                        with col_m1:
+                            mean_mat = st.number_input(
+                                "Mean Strength (μ) (MPa)", 
+                                min_value=1.0, 
+                                value=250.0,
+                                help="Nilai rata-rata aritmatika kekuatan material."
+                            )
+                        with col_m2:
+                            std_mat = st.number_input(
+                                "Std Dev (σ) (MPa)", 
+                                min_value=0.1, 
+                                value=25.0,
+                                help="Standar deviasi aritmatika kekuatan material."
+                            )
                     else:
-                        cov_val = st.number_input("COV (0 to 1)", min_value=0.01, max_value=1.0, value=0.1)
-                        std_mat = mean_mat * cov_val
+                        col_m1, col_m2 = st.columns(2)
+                        with col_m1:
+                            mu_ln = st.number_input(
+                                "Log-scale Mean (μ_ln)", 
+                                value=5.5, 
+                                step=0.1, 
+                                format="%.4f",
+                                help="Parameter rata-rata dalam skala logaritma natural (μ_ln = E[ln(X)])."
+                            )
+                        with col_m2:
+                            sigma_ln = st.number_input(
+                                "Log-scale Std Dev (σ_ln)", 
+                                min_value=0.01, 
+                                value=0.1, 
+                                step=0.01, 
+                                format="%.4f",
+                                help="Parameter deviasi standar dalam skala logaritma natural (σ_ln = Std[ln(X)])."
+                            )
+                        mean_mat = np.exp(mu_ln + 0.5 * sigma_ln**2)
+                        std_mat = np.sqrt((np.exp(sigma_ln**2) - 1.0) * np.exp(2.0 * mu_ln + sigma_ln**2))
+                        st.info(f"Equivalent Arithmetic Stats: Mean = **{mean_mat:.2f} MPa**, Std Dev = **{std_mat:.2f} MPa**")
+                        
+                elif mat_dist == "Weibull":
+                    weib_input_mode = st.radio(
+                        "Weibull Parameters Input Mode",
+                        ["Arithmetic (Mean & Std Dev)", "Weibull Parameters (Shape k & Scale λ)"],
+                        help="Pilih metode input untuk distribusi Weibull. Parameter bentuk (shape) dan skala (scale) akan dikonversi dengan rumus Gamma."
+                    )
+                    if weib_input_mode == "Arithmetic (Mean & Std Dev)":
+                        col_m1, col_m2 = st.columns(2)
+                        with col_m1:
+                            mean_mat = st.number_input(
+                                "Mean Strength (μ) (MPa)", 
+                                min_value=1.0, 
+                                value=250.0,
+                                help="Nilai rata-rata aritmatika kekuatan material."
+                            )
+                        with col_m2:
+                            std_mat = st.number_input(
+                                "Std Dev (σ) (MPa)", 
+                                min_value=0.1, 
+                                value=25.0,
+                                help="Standar deviasi aritmatika kekuatan material."
+                            )
+                    else:
+                        col_m1, col_m2 = st.columns(2)
+                        with col_m1:
+                            shape_k = st.number_input(
+                                "Shape Parameter (k)", 
+                                min_value=0.1, 
+                                value=10.0, 
+                                step=0.5, 
+                                format="%.2f",
+                                help="Parameter bentuk (shape parameter c/k pada scipy/Wikipedia) yang menentukan kelengkungan distribusi."
+                            )
+                        with col_m2:
+                            scale_lam = st.number_input(
+                                "Scale Parameter (λ) (MPa)", 
+                                min_value=1.0, 
+                                value=260.0, 
+                                step=10.0, 
+                                format="%.2f",
+                                help="Parameter skala (scale parameter λ) dalam MPa."
+                            )
+                        mean_mat = scale_lam * math.gamma(1.0 + 1.0 / shape_k)
+                        std_mat = np.sqrt(scale_lam**2 * (math.gamma(1.0 + 2.0 / shape_k) - math.gamma(1.0 + 1.0 / shape_k)**2))
+                        st.info(f"Equivalent Arithmetic Stats: Mean = **{mean_mat:.2f} MPa**, Std Dev = **{std_mat:.2f} MPa**")
             
             elif mat_input_method == "Upload CSV":
                 mat_csv = st.file_uploader(
@@ -178,8 +275,6 @@ with tab1:
                 mean_mat = 414.93
                 std_mat = 57.65
                 
-            mat_dist = st.selectbox("Probability Distribution", ["Normal", "Lognormal", "Weibull"], key="mat_dist_select")
-            
             if st.button("Add Material", use_container_width=True):
                 st.session_state['materials'].append({
                     "name": mat_name,
@@ -269,6 +364,7 @@ with tab1:
         st.subheader("3. Dynamic Wave Bending Moments")
         with st.container(border=True):
             wave_name = st.text_input("Wave Case Keterangan", "Head Wave Hs=2.58m")
+            wave_dist = st.selectbox("Fit/Model Load Distribution", ["Normal", "Rayleigh", "Weibull"], key="wave_dist_select", help="Pilih jenis distribusi probabilitas untuk memodelkan beban momen dinamis gelombang.")
             wave_source = st.radio("Dynamic Load Source", ["Manual Parameters", "Upload CSV", "Use Example File"], key="wave_source")
             
             wave_hs = st.number_input("Wave Height Hs (m)", min_value=0.1, value=2.58)
@@ -277,12 +373,100 @@ with tab1:
             # Setup inputs based on source
             wave_params = {}
             if wave_source == "Manual Parameters":
-                col_w1, col_w2 = st.columns(2)
-                with col_w1:
-                    mu_d = st.number_input("Mean Dynamic Moment (MN.m)", min_value=0.0, value=15.0)
-                with col_w2:
-                    std_d = st.number_input("Std Dev Dynamic Moment (MN.m)", min_value=0.1, value=5.0)
-                wave_params = {"file_type": "Manual", "mean": mu_d * 1e6, "std": std_d * 1e6}
+                if wave_dist == "Normal":
+                    col_w1, col_w2 = st.columns(2)
+                    with col_w1:
+                        mu_d = st.number_input(
+                            "Mean Dynamic Moment (MN.m)", 
+                            min_value=0.0, 
+                            value=15.0,
+                            help="Nilai rata-rata momen dinamis gelombang."
+                        )
+                    with col_w2:
+                        std_d = st.number_input(
+                            "Std Dev Dynamic Moment (MN.m)", 
+                            min_value=0.1, 
+                            value=5.0,
+                            help="Standar deviasi momen dinamis gelombang."
+                        )
+                    wave_params = {"file_type": "Manual", "mean": mu_d * 1e6, "std": std_d * 1e6}
+                    
+                elif wave_dist == "Rayleigh":
+                    ray_input_mode = st.radio(
+                        "Rayleigh Parameters Input Mode",
+                        ["Arithmetic Mean (MN.m)", "Rayleigh Scale Parameter (σ) (MN.m)"],
+                        help="Pilih metode input untuk distribusi Rayleigh. Parameter skala akan dikonversi dengan rumus Rayleigh."
+                    )
+                    if ray_input_mode == "Arithmetic Mean (MN.m)":
+                        mu_d = st.number_input(
+                            "Mean Dynamic Moment (MN.m)", 
+                            min_value=0.01, 
+                            value=15.0,
+                            help="Nilai rata-rata momen dinamis gelombang."
+                        )
+                        scale_val = mu_d / np.sqrt(np.pi / 2.0)
+                        std_d = scale_val * np.sqrt(2.0 - np.pi / 2.0)
+                    else:
+                        scale_val = st.number_input(
+                            "Rayleigh Scale Parameter (σ) (MN.m)", 
+                            min_value=0.01, 
+                            value=12.0, 
+                            step=1.0,
+                            help="Parameter skala (σ) untuk distribusi Rayleigh. Hubungan dengan tinggi gelombang individual jangka pendek."
+                        )
+                        mu_d = scale_val * np.sqrt(np.pi / 2.0)
+                        std_d = scale_val * np.sqrt(2.0 - np.pi / 2.0)
+                        
+                    st.info(f"Equivalent Arithmetic Stats: Mean = **{mu_d:.2f} MN.m**, Std Dev = **{std_d:.2f} MN.m**")
+                    wave_params = {"file_type": "Manual", "mean": mu_d * 1e6, "std": std_d * 1e6}
+                    
+                elif wave_dist == "Weibull":
+                    weib_input_mode = st.radio(
+                        "Weibull Parameters Input Mode (Wave)",
+                        ["Arithmetic (Mean & Std Dev) (MN.m)", "Weibull Parameters (Shape k & Scale λ) (MN.m)"],
+                        help="Pilih metode input untuk distribusi Weibull."
+                    )
+                    if weib_input_mode == "Arithmetic (Mean & Std Dev) (MN.m)":
+                        col_w1, col_w2 = st.columns(2)
+                        with col_w1:
+                            mu_d = st.number_input(
+                                "Mean Dynamic Moment (MN.m)", 
+                                min_value=0.0, 
+                                value=15.0,
+                                help="Nilai rata-rata momen dinamis gelombang."
+                            )
+                        with col_w2:
+                            std_d = st.number_input(
+                                "Std Dev Dynamic Moment (MN.m)", 
+                                min_value=0.1, 
+                                value=5.0,
+                                help="Standar deviasi momen dinamis gelombang."
+                            )
+                    else:
+                        col_w1, col_w2 = st.columns(2)
+                        with col_w1:
+                            shape_k = st.number_input(
+                                "Shape Parameter (k)", 
+                                min_value=0.1, 
+                                value=1.8, 
+                                step=0.1, 
+                                format="%.2f",
+                                help="Parameter bentuk Weibull (c/k pada scipy/Wikipedia)."
+                            )
+                        with col_w2:
+                            scale_lam = st.number_input(
+                                "Scale Parameter (λ) (MN.m)", 
+                                min_value=0.1, 
+                                value=16.5, 
+                                step=1.0, 
+                                format="%.2f",
+                                help="Parameter skala Weibull (λ) dalam MN.m."
+                            )
+                        mu_d = scale_lam * math.gamma(1.0 + 1.0 / shape_k)
+                        std_d = np.sqrt(scale_lam**2 * (math.gamma(1.0 + 2.0 / shape_k) - math.gamma(1.0 + 1.0 / shape_k)**2))
+                        
+                    st.info(f"Equivalent Arithmetic Stats: Mean = **{mu_d:.2f} MN.m**, Std Dev = **{std_d:.2f} MN.m**")
+                    wave_params = {"file_type": "Manual", "mean": mu_d * 1e6, "std": std_d * 1e6}
                 
             elif wave_source == "Upload CSV":
                 wave_csv = st.file_uploader(
@@ -297,8 +481,6 @@ with tab1:
                 examples_list = [f for f in os.listdir(os.path.join(EXAMPLES_DIR, 'wbm')) if f.endswith('.csv')]
                 selected_ex = st.selectbox("Select Example CSV", sorted(examples_list))
                 wave_params = {"file_type": "Example File", "filename": os.path.join('wbm', selected_ex)}
-                
-            wave_dist = st.selectbox("Fit/Model Load Distribution", ["Normal", "Rayleigh", "Weibull"], key="wave_dist_select")
             
             if st.button("Add Wave Case", use_container_width=True):
                 st.session_state['wave_cases'].append({
@@ -327,23 +509,52 @@ with tab1:
                 st.session_state['wave_cases'] = []
                 st.rerun()
 
+        # 4. SECTION MODULI (W)
+        st.subheader("4. Section Moduli (W)")
+        with st.container(border=True):
+            col_w1, col_w2 = st.columns([3, 1])
+            with col_w1:
+                new_w = st.number_input("Add Section Modulus W (m³)", min_value=0.01, value=3.2292, step=0.1, key="input_modulus_w")
+            with col_w2:
+                st.write("") # spacing
+                st.write("") # spacing
+                add_w_btn = st.button("Add W", use_container_width=True, key="add_w_btn_action")
+                
+            if add_w_btn:
+                if new_w not in st.session_state['section_moduli']:
+                    st.session_state['section_moduli'].append(new_w)
+                    st.success(f"Added W: {new_w} m³")
+                    st.rerun()
+                else:
+                    st.warning(f"W: {new_w} m³ already exists.")
+                    
+        # Display Current Section Moduli
+        if st.session_state['section_moduli']:
+            st.markdown("**Current Section Moduli (m³):**")
+            w_df = pd.DataFrame({"W (m³)": st.session_state['section_moduli']})
+            st.dataframe(w_df, width="stretch")
+            if st.button("Clear Section Moduli"):
+                st.session_state['section_moduli'] = []
+                st.rerun()
+
 # ----------------- VARIATION CHECKLISTS & EXECUTE -----------------
 st.markdown("---")
-st.subheader("4. Run Simulation & Reliability Analysis")
+st.subheader("5. Run Simulation & Reliability Analysis")
 
-if not st.session_state['materials'] or not st.session_state['swbm_cases'] or not st.session_state['static_wbm_cases'] or not st.session_state['wave_cases']:
-    st.warning("Please configure at least one item in each category (Materials, SWBM, Static WBM, Wave Cases) to run the simulation.")
+if not st.session_state['materials'] or not st.session_state['swbm_cases'] or not st.session_state['static_wbm_cases'] or not st.session_state['wave_cases'] or not st.session_state['section_moduli']:
+    st.warning("Please configure at least one item in each category (Materials, Section Moduli, SWBM, Static WBM, Wave Cases) to run the simulation.")
 else:
     # Build complete grid of runs
     runs = []
     run_names = []
     for m in st.session_state['materials']:
-        for sw in st.session_state['swbm_cases']:
-            for st_w in st.session_state['static_wbm_cases']:
-                for wa in st.session_state['wave_cases']:
-                    run_name = f"Mat: {m['name']} | SWBM: {sw['name']} | Static: {st_w['name']} | Wave: {wa['name']}"
-                    runs.append((m, sw, st_w, wa))
-                    run_names.append(run_name)
+        for w in st.session_state['section_moduli']:
+            for sw in st.session_state['swbm_cases']:
+                for st_w in st.session_state['static_wbm_cases']:
+                    for wa in st.session_state['wave_cases']:
+                        run_name = f"W: {w} m³ | Mat: {m['name']} | SWBM: {sw['name']} | Static: {st_w['name']} | Wave: {wa['name']}"
+                        runs.append((m, w, sw, st_w, wa))
+                        run_names.append(run_name)
                     
     st.markdown("**Select Configurations to Analyze:**")
     selected_runs_idx = []
@@ -370,7 +581,7 @@ else:
             execution_details = {}
             
             for idx in selected_runs_idx:
-                m, sw, st_w, wa = runs[idx]
+                m, w, sw, st_w, wa = runs[idx]
                 
                 # Retrieve/Process Wave Data
                 mu_d, std_d = 0.0, 0.0
@@ -423,7 +634,7 @@ else:
                 std_moment = std_d + mu_moment / 8.0
                 
                 # Run reliability calculations
-                W = st.session_state['section_modulus']
+                W = w
                 mu_stress = (mu_moment / W) * 1e-6
                 std_stress = (std_moment / W) * 1e-6
                 
@@ -438,16 +649,19 @@ else:
                 
                 # Format failure probability friendly representation
                 pf = rel_results["Pf_L3"]
-                if pf < 1e-4:
+                if pf == 0.0:
+                    pf_friendly = "0"
+                elif pf < 0.01:
                     exp = int(np.floor(np.log10(pf)))
                     base = pf / (10 ** exp)
                     pf_friendly = f"{base:.1f} x 10^{exp}"
                 else:
-                    pf_friendly = f"{pf:.4e}"
+                    pf_friendly = f"{pf:.4f}"
                     
                 results_list.append({
                     "Case Description": run_names[idx],
                     "Case Keterangan": wa["name"],
+                    "W (m³)": W,
                     "Material": m["name"],
                     "Mean Strength (MPa)": m["mean"],
                     "FoS": rel_results["FoS"],
@@ -474,7 +688,7 @@ with tab2:
         df_res = st.session_state['results']
         
         # Display table with select columns
-        display_cols = ["Case Description", "Material", "Mean Strength (MPa)", "FoS", "Analytical Beta", "Level 3 Beta (Eq)", "Peluang Kegagalan"]
+        display_cols = ["Case Description", "W (m³)", "Material", "Mean Strength (MPa)", "FoS", "Analytical Beta", "Level 3 Beta (Eq)", "Peluang Kegagalan"]
         st.dataframe(df_res[display_cols], width="stretch")
         
         # Download button
@@ -503,7 +717,7 @@ with tab2:
 with tab3:
     st.subheader("Visualization Center")
     
-    if st.session_state['results'] is not None and st.session_state['execution_details']:
+    if st.session_state['results'] is not None:
         # Toggle switch to prevent Matplotlib lag during input editing
         enable_plots = st.toggle("Enable Plotting & Charts", value=False, help="Aktifkan ini untuk melihat grafik hasil analisis. Nonaktifkan ketika sedang memasukkan atau mengedit data input untuk performa maksimal (mencegah lag).")
         
@@ -517,34 +731,37 @@ with tab3:
             selected_plot_case = st.selectbox("Select Case to Visualize in detail", df_res["Case Description"].values)
             row_plot = df_res[df_res["Case Description"] == selected_plot_case].iloc[0]
             
+            # Check if the selected plot case has timeseries details
+            has_details = (selected_plot_case in details)
+            
             # Visualisation options checklists
             st.markdown("##### Select Plots to Render:")
             col_ch1, col_ch2, col_ch3 = st.columns(3)
-            show_raw = col_ch1.checkbox("Raw Time-Series Wave Moments", value=True)
-            show_comb = col_ch2.checkbox("Combined Turkstra Moment", value=True)
+            
+            if has_details:
+                show_raw = col_ch1.checkbox("Raw Time-Series Wave Moments", value=True)
+                show_comb = col_ch2.checkbox("Combined Turkstra Moment", value=True)
+            else:
+                show_raw = col_ch1.checkbox("Raw Time-Series Wave Moments (Not Available)", value=False, disabled=True, help="Hanya tersedia jika input menggunakan file CSV waktu dinamis.")
+                show_comb = col_ch2.checkbox("Combined Turkstra Moment (Not Available)", value=False, disabled=True, help="Hanya tersedia jika input menggunakan file CSV waktu dinamis.")
+                
             show_jpdf = col_ch3.checkbox("JPDF Overlay (Strength vs Stress)", value=True)
             
             # 1. Raw Time Series
-            if show_raw:
-                if selected_plot_case in details:
-                    det = details[selected_plot_case]
-                    st.markdown(f"#### 1. Raw Wave Bending Moments - {selected_plot_case}")
-                    fig_raw = plot_raw_wave_moments(det["time"], det["raw_components"], f"Raw Wave Bending Moments: {row_plot['Case Keterangan']}")
-                    st.pyplot(fig_raw)
-                else:
-                    st.info("No raw time series data available for manual input cases.")
-                    
+            if show_raw and has_details:
+                det = details[selected_plot_case]
+                st.markdown(f"#### 1. Raw Wave Bending Moments - {selected_plot_case}")
+                fig_raw = plot_raw_wave_moments(det["time"], det["raw_components"], f"Raw Wave Bending Moments: {row_plot['Case Keterangan']}")
+                st.pyplot(fig_raw)
+                
             # 2. Combined Moments
-            if show_comb:
-                if selected_plot_case in details:
-                    det = details[selected_plot_case]
-                    st.markdown(f"#### 2. Combined Turkstra Moment - {selected_plot_case}")
-                    is_beam = "D=90°" in selected_plot_case or "D = 90" in selected_plot_case
-                    fig_comb = plot_combined_dynamic_moments(det["time"], det["combined"], f"Combined Turkstra Wave Moment: {row_plot['Case Keterangan']}", is_beam)
-                    st.pyplot(fig_comb)
-                else:
-                    st.info("No combined timeseries data available for manual input cases.")
-                    
+            if show_comb and has_details:
+                det = details[selected_plot_case]
+                st.markdown(f"#### 2. Combined Turkstra Moment - {selected_plot_case}")
+                is_beam = "D=90°" in selected_plot_case or "D = 90" in selected_plot_case
+                fig_comb = plot_combined_dynamic_moments(det["time"], det["combined"], f"Combined Turkstra Wave Moment: {row_plot['Case Keterangan']}", is_beam)
+                st.pyplot(fig_comb)
+                
             # 3. JPDF Overlay
             if show_jpdf:
                 st.markdown(f"#### 3. JPDF Overlay (MPa) - {selected_plot_case}")
@@ -555,7 +772,7 @@ with tab3:
                     l_mean=row_plot["mu_moment"],
                     l_std=row_plot["std_moment"],
                     l_dist=row_plot["l_dist"],
-                    W_modulus=st.session_state['section_modulus'],
+                    W_modulus=row_plot["W (m³)"],
                     title=f"JPDF Overlay: {row_plot['Case Keterangan']}"
                 )
                 st.pyplot(fig_jpdf)
